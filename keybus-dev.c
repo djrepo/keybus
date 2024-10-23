@@ -22,8 +22,10 @@
 #include <linux/sched.h>
 #include <linux/uaccess.h>
 #include <asm/bitops.h>
-#include <linux/platform_data/bcm2708.h>
-
+// #include <linux/platform_data/bcm2710.h>
+#include <linux/ktime.h>
+#include <linux/time64.h>
+#include <linux/compiler.h>
 #include "keybus-protocol.h"
 
 #define  DEVICE_NAME "keybus"
@@ -78,7 +80,7 @@ MODULE_PARM_DESC(gpio_data, " GPIO Data number (default=23)");
 #define PACKET_MAX_LEN 12
 
 static int irq_number;
-static struct timespec ts_last;
+static struct timespec64 ts_last;
 static char keybus_status = 0;
 static unsigned int crc_errors = 0;
 static struct {
@@ -92,7 +94,7 @@ static DECLARE_WAIT_QUEUE_HEAD(in_packets_wait_queue);
 static unsigned int packet_count = 0;
 
 static ssize_t ts_last_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf) {
-    return sprintf(buf, "%.2lu:%.2lu:%.2lu:%.9lu\n", (ts_last.tv_sec/3600)%24,
+    return sprintf(buf, "%.2llu:%.2llu:%.2llu:%.9lu\n", (ts_last.tv_sec/3600)%24,
                    (ts_last.tv_sec/60) % 60, ts_last.tv_sec % 60, ts_last.tv_nsec );
 }
 
@@ -265,7 +267,7 @@ static void debug_print_packet(char* msg, char* packet) { // of length PACKET_MA
 #endif
 
 static irqreturn_t clk_irq_handler(unsigned int irq, void *dev_id, struct pt_regs *regs) {
-    static struct timespec ts_current, ts_diff;
+    static struct timespec64 ts_current, ts_diff;
     static int num_bits = IRQ_HANDLER_INIT;
     static int max_packet_bits = (PACKET_MAX_LEN - 1) * 8;
     static unsigned int byte_index = 0;
@@ -279,11 +281,11 @@ static irqreturn_t clk_irq_handler(unsigned int irq, void *dev_id, struct pt_reg
 
         num_bits = IRQ_HANDLER_WAIT;
 
-	getnstimeofday(&ts_last);
+	ktime_get_real_ts64(&ts_last);
     } else {
-	getnstimeofday(&ts_current);
+	ktime_get_real_ts64(&ts_current);
 
-	ts_diff = timespec_sub(ts_current, ts_last);
+	ts_diff = timespec64_sub(ts_current, ts_last);
 
 	ts_last = ts_current;
 
@@ -291,7 +293,7 @@ static irqreturn_t clk_irq_handler(unsigned int irq, void *dev_id, struct pt_reg
 
         head = in_packets.head;
 
-	if (timespec_to_ns(&ts_diff) / 1000000 > IRQ_HANDLER_SYNC_MS) {
+	if (timespec64_to_ns(&ts_diff) / 1000000 > IRQ_HANDLER_SYNC_MS) {
             // got sync
             if (num_bits >= 17 && in_packets.buffer[byte_index + 1] == 0x05) { // status
                 keybus_status = in_packets.buffer[byte_index + 2] << 1 |
@@ -314,7 +316,7 @@ static irqreturn_t clk_irq_handler(unsigned int irq, void *dev_id, struct pt_reg
                 }
             }
 
-            tail = ACCESS_ONCE(in_packets.tail);
+            tail = READ_ONCE(in_packets.tail);
 
             if (CIRC_SPACE(head, tail, CIRCULAR_BUFFER_SIZE) >= 1) {
                 // there is space, start next packet (at current head)
@@ -431,7 +433,7 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
     buf = kmalloc(len, GFP_KERNEL);
 
     if (!buf) {
-        printk(KERN_ALERT "%s: Could not allocate %d bytes of memory", DEVICE_NAME, len);
+        printk(KERN_ALERT "%s: Could not allocate %zu bytes of memory", DEVICE_NAME, len);
         return -EFAULT;
     }
 
